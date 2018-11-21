@@ -187,54 +187,42 @@ u1_t hal_spi (u1_t out) {
 
 // -----------------------------------------------------------------------------
 // TIME
+// This code is intended for ATmega328p only
+#include <avr/interrupt.h>
+#include <avr/sleep.h>
 
 static void hal_time_init () {
-    // Nothing to do
+    // safe procedure of switching the clock source
+    // when Timer2 operates asynchronously, according to datasheet
+    // 22.9. Asynchronous Operation of Timer/Counter2
+    // see also https://www.avrfreaks.net/forum/overflow-interrupt-timer2-asynchronous-mode
+    TIMSK2 = 0;           // Disable timer2 interrupts              (1)
+    ASSR   = _BV(AS2);    // Switch to asynchronous mode            (2)
+    TCNT2  = 0;           // Clear timer-counter                    (3)
+    TCCR2A = 0;           // Reset control registers: normal mode,  (3)
+    TCCR2B = _BV(CS20);   //   no prescaling (32.768/256 ovf/s)     (3)
+    while (ASSR & (_BV(TCN2UB) | _BV(TCR2AUB) | _BV(TCR2BUB)));  // (4)
+    TIFR2  = 0;           // Clear interrupt flags                  (5)
+    TIMSK2 = _BV(TOIE2);  // Enable timer2 overflow interrupt       (6)
 }
 
-u4_t hal_ticks () {
-    // Because micros() is scaled down in this function, micros() will
-    // overflow before the tick timer should, causing the tick timer to
-    // miss a significant part of its values if not corrected. To fix
-    // this, the "overflow" serves as an overflow area for the micros()
-    // counter. It consists of three parts:
-    //  - The US_PER_OSTICK upper bits are effectively an extension for
-    //    the micros() counter and are added to the result of this
-    //    function.
-    //  - The next bit overlaps with the most significant bit of
-    //    micros(). This is used to detect micros() overflows.
-    //  - The remaining bits are always zero.
-    //
-    // By comparing the overlapping bit with the corresponding bit in
-    // the micros() return value, overflows can be detected and the
-    // upper bits are incremented. This is done using some clever
-    // bitwise operations, to remove the need for comparisons and a
-    // jumps, which should result in efficient code. By avoiding shifts
-    // other than by multiples of 8 as much as possible, this is also
-    // efficient on AVR (which only has 1-bit shifts).
-    static uint8_t overflow = 0;
+static volatile u4_t RTCoverflow=0;
+static u4_t HAL_timer=0;
 
-    // Scaled down timestamp. The top US_PER_OSTICK_EXPONENT bits are 0,
-    // the others will be the lower bits of our return value.
-    uint32_t scaled = micros() >> US_PER_OSTICK_EXPONENT;
-    // Most significant byte of scaled
-    uint8_t msb = scaled >> 24;
-    // Mask pointing to the overlapping bit in msb and overflow.
-    const uint8_t mask = (1 << (7 - US_PER_OSTICK_EXPONENT));
-    // Update overflow. If the overlapping bit is different
-    // between overflow and msb, it is added to the stored value,
-    // so the overlapping bit becomes equal again and, if it changed
-    // from 1 to 0, the upper bits are incremented.
-    overflow += (msb ^ overflow) & mask;
+ISR(TIMER2_OVF_vect)
+{
+    // Zu Dummywrite und Whileschleife siehe Mikrocontroller.net
+    // sie dienen dazu dass ein Overflow nicht mehrmahls gezählt wird.
+    // https://www.mikrocontroller.net/articles/AVR-GCC-Tutorial/Die_Timer_und_Zähler_des_AVR#Timer2_im_Asynchron_Mode
+    TCCR2B = TCCR2B;              //Dummy Write
+    RTCoverflow++;
+    RTCoverflow&=0x00FFFFFF;      // Make sure it overflows at 3-byte boundary
+    while(ASSR & ((1<<TCN2UB) | (1<<OCR2AUB) | (1<<OCR2BUB) |
+                  (1<<TCR2AUB) | (1<<TCR2BUB)));
+}
 
-    // Return the scaled value with the upper bits of stored added. The
-    // overlapping bit will be equal and the lower bits will be 0, so
-    // bitwise or is a no-op for them.
-    return scaled | ((uint32_t)overflow << 24);
-
-    // 0 leads to correct, but overly complex code (it could just return
-    // micros() unmodified), 8 leaves no room for the overlapping bit.
-    static_assert(US_PER_OSTICK_EXPONENT > 0 && US_PER_OSTICK_EXPONENT < 8, "Invalid US_PER_OSTICK_EXPONENT value");
+u4_t hal_ticks() {
+    return (RTCoverflow<<8)+TCNT2;
 }
 
 // Returns the number of ticks until time. Negative values indicate that
@@ -245,19 +233,19 @@ static s4_t delta_time(u4_t time) {
 
 void hal_waitUntil (u4_t time) {
     s4_t delta = delta_time(time);
-    // From delayMicroseconds docs: Currently, the largest value that
-    // will produce an accurate delay is 16383.
-    while (delta > (16000 / US_PER_OSTICK)) {
-        delay(16);
-        delta -= (16000 / US_PER_OSTICK);
+    if (delta > ms2osticks(16)) {
+        HAL_timer=time;
+        hal_sleep();
+    } else {
+        if (delta > 0) {
+            delayMicroseconds(osticks2us(delta));
+        }
     }
-    if (delta > 0)
-        delayMicroseconds(delta * US_PER_OSTICK);
 }
 
 // check and rewind for target time
 u1_t hal_checkTimer (u4_t time) {
-    // No need to schedule wakeup, since we're not sleeping
+    HAL_timer=time;
     return delta_time(time) <= 0;
 }
 
@@ -285,7 +273,24 @@ void hal_enableIRQs () {
 }
 
 void hal_sleep () {
-    // Not implemented
+  if(delta_time(HAL_timer) <= 0){
+    return; // TODO: Find out who is calling hal_sleep without setting the timer!
+  }
+  Serial.flush();
+  while((HAL_timer/256)>RTCoverflow){ // only sleep if TIMER2OVF will occur
+    // actually sleep here
+    set_sleep_mode(SLEEP_MODE_PWR_SAVE);
+    cli();
+    sleep_enable();
+    sleep_bod_disable(); // disabling BOD during sleep: 26uA less
+    sei();
+    sleep_cpu();
+    // sleeping here until we wake up
+    sleep_disable();
+  }
+  while(((HAL_timer/256)==RTCoverflow) && ((HAL_timer%256)>TCNT2)){
+    delayMicroseconds(osticks2us(1));
+  }
 }
 
 // -----------------------------------------------------------------------------
