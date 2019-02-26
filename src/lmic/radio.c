@@ -264,7 +264,7 @@
 #define MAP_DIO0_LORA_TXDONE   0x40  // 01------
 #define MAP_DIO1_LORA_RXTOUT   0x00  // --00----
 #define MAP_DIO1_LORA_NOP      0x30  // --11----
-#define MAP_DIO2_LORA_NOP      0xC0  // ----11--
+#define MAP_DIO2_LORA_NOP      0x0C  // ----11--
 
 #define MAP_DIO0_FSK_READY     0x00  // 00------ (packet sent / payload ready)
 #define MAP_DIO1_FSK_NOP       0x30  // --11----
@@ -299,40 +299,25 @@ static u1_t randbuf[16];
 
 
 static void writeReg (u1_t addr, u1_t data ) {
-    hal_pin_nss(0);
-    hal_spi(addr | 0x80);
-    hal_spi(data);
-    hal_pin_nss(1);
+    hal_spi_write(addr | 0x80, &data, 1);
 }
 
 static u1_t readReg (u1_t addr) {
-    hal_pin_nss(0);
-    hal_spi(addr & 0x7F);
-    u1_t val = hal_spi(0x00);
-    hal_pin_nss(1);
-    return val;
+    u1_t buf[1];
+    hal_spi_read(addr & 0x7f, buf, 1);
+    return buf[0];
 }
 
 static void writeBuf (u1_t addr, xref2u1_t buf, u1_t len) {
-    hal_pin_nss(0);
-    hal_spi(addr | 0x80);
-    for (u1_t i=0; i<len; i++) {
-        hal_spi(buf[i]);
-    }
-    hal_pin_nss(1);
+    hal_spi_write(addr | 0x80, buf, len);
 }
 
 static void readBuf (u1_t addr, xref2u1_t buf, u1_t len) {
-    hal_pin_nss(0);
-    hal_spi(addr & 0x7F);
-    for (u1_t i=0; i<len; i++) {
-        buf[i] = hal_spi(0x00);
-    }
-    hal_pin_nss(1);
+    hal_spi_read(addr & 0x7f, buf, len);
 }
 
-static void requestTcxo(bit_t state) {
-    ostime_t const ticks = hal_setTcxoPower(state);
+static void requestModuleActive(bit_t state) {
+    ostime_t const ticks = hal_setModuleActive(state);
 
     if (ticks)
         hal_waitUntil(os_getTime() + ticks);;
@@ -341,10 +326,10 @@ static void requestTcxo(bit_t state) {
 static void writeOpmode(u1_t mode) {
     u1_t const maskedMode = mode & OPMODE_MASK;
     if (maskedMode != OPMODE_SLEEP)
-        requestTcxo(1);
+        requestModuleActive(1);
     writeReg(RegOpMode, mode);
     if (maskedMode == OPMODE_SLEEP)
-        requestTcxo(0);
+        requestModuleActive(0);
 }
 
 static void opmode (u1_t mode) {
@@ -460,7 +445,7 @@ static void configChannel () {
 static void configPower () {
 #ifdef CFG_sx1276_radio
     // PA_BOOST output is assumed but not 20 dBm.
-    s1_t pw = (s1_t)LMIC.txpow;
+    s1_t pw = (s1_t)LMIC.radio_txpow;
     if(pw > 17) {
         pw = 17;
     } else if(pw < 2) {
@@ -476,7 +461,7 @@ static void configPower () {
 
 #elif CFG_sx1272_radio
     // set PA config (2-17 dBm using PA_BOOST)
-    s1_t pw = (s1_t)LMIC.txpow;
+    s1_t pw = (s1_t)LMIC.radio_txpow;
     if(pw > 17) {
         pw = 17;
     } else if(pw < 2) {
@@ -772,7 +757,7 @@ static void startrx (u1_t rxmode) {
 int radio_init () {
     hal_disableIRQs();
 
-    requestTcxo(1);
+    requestModuleActive(1);
 
     // manually reset radio
 #ifdef CFG_sx1276_radio

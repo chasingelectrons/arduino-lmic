@@ -25,6 +25,7 @@
 static const Arduino_LMIC::HalPinmap_t *plmic_pins;
 static Arduino_LMIC::HalConfiguration_t *pHalConfig;
 static Arduino_LMIC::HalConfiguration_t nullHalConig;
+static hal_failure_handler_t* custom_hal_failure_handler = NULL;
 
 static void hal_interrupt_init(); // Fwd declaration
 
@@ -156,33 +157,36 @@ static void hal_spi_init () {
     SPI.begin();
 }
 
-void hal_pin_nss (u1_t val) {
-    if (!val) {
-        uint32_t spi_freq;
+static void hal_spi_trx(u1_t cmd, u1_t* buf, size_t len, bit_t is_read) {
+    uint32_t spi_freq;
+    u1_t nss = plmic_pins->nss;
 
-        if ((spi_freq = plmic_pins->spi_freq) == 0)
-            spi_freq = LMIC_SPI_FREQ;
+    if ((spi_freq = plmic_pins->spi_freq) == 0)
+        spi_freq = LMIC_SPI_FREQ;
 
-        SPISettings settings(spi_freq, MSBFIRST, SPI_MODE0);
-        SPI.beginTransaction(settings);
-    } else {
-        SPI.endTransaction();
+    SPISettings settings(spi_freq, MSBFIRST, SPI_MODE0);
+    SPI.beginTransaction(settings);
+    digitalWrite(nss, 0);
+
+    SPI.transfer(cmd);
+
+    for (; len > 0; --len, ++buf) {
+        u1_t data = is_read ? 0x00 : *buf;
+        data = SPI.transfer(data);
+        if (is_read)
+            *buf = data;
     }
 
-    //Serial.println(val?">>":"<<");
-    digitalWrite(plmic_pins->nss, val);
+    digitalWrite(nss, 1);
+    SPI.endTransaction();
 }
 
-// perform SPI transaction with radio
-u1_t hal_spi (u1_t out) {
-    u1_t res = SPI.transfer(out);
-/*
-    Serial.print(">");
-    Serial.print(out, HEX);
-    Serial.print("<");
-    Serial.println(res, HEX);
-    */
-    return res;
+void hal_spi_write(u1_t cmd, const u1_t* buf, size_t len) {
+    hal_spi_trx(cmd, (u1_t*)buf, len, 0);
+}
+
+void hal_spi_read(u1_t cmd, u1_t* buf, size_t len) {
+    hal_spi_trx(cmd, buf, len, 1);
 }
 
 // -----------------------------------------------------------------------------
@@ -381,7 +385,12 @@ bool hal_init_with_pinmap(const HalPinmap_t *pPinmap)
     }
 }; // namespace Arduino_LMIC
 
+
 void hal_failed (const char *file, u2_t line) {
+    if (custom_hal_failure_handler != NULL) {
+        (*custom_hal_failure_handler)(file, line);
+    }
+
 #if defined(LMIC_FAILURE_TO)
     LMIC_FAILURE_TO.println("FAILURE ");
     LMIC_FAILURE_TO.print(file);
@@ -389,12 +398,24 @@ void hal_failed (const char *file, u2_t line) {
     LMIC_FAILURE_TO.println(line);
     LMIC_FAILURE_TO.flush();
 #endif
+
     hal_disableIRQs();
-    while(1);
+
+    // Infinite loop
+    while (1) {
+        ;
+    }
 }
 
-ostime_t hal_setTcxoPower (u1_t val) {
-    return pHalConfig->setTcxoPower(val);
+void hal_set_failure_handler(const hal_failure_handler_t* const handler) {
+    custom_hal_failure_handler = handler;
+}
+
+ostime_t hal_setModuleActive (bit_t val) {
+    // setModuleActive() takes a c++ bool, so
+    // it effectively says "val != 0". We
+    // don't have to.
+    return pHalConfig->setModuleActive(val);
 }
 
 bit_t hal_queryUsingTcxo(void) {

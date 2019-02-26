@@ -1171,7 +1171,8 @@ static bit_t processJoinAccept (void) {
         LMIC.datarate = AS923_DR_SF10;
 #endif
     }
-    LMIC.opmode &= ~(OP_JOINING|OP_TRACK|OP_REJOIN|OP_TXRXPEND|OP_PINGINI) | OP_NEXTCHNL;
+    LMIC.opmode &= ~(OP_JOINING|OP_TRACK|OP_REJOIN|OP_TXRXPEND|OP_PINGINI);
+    LMIC.opmode |= OP_NEXTCHNL;
     LMIC.txCnt = 0;
     stateJustJoined();
     LMIC.dn2Dr = LMIC.frame[OFF_JA_DLSET] & 0x0F;
@@ -1657,9 +1658,16 @@ static bit_t processDnData (void) {
             EV(devCond, ERR, (e_.reason = EV::devCond_t::LINK_DEAD,
                               e_.eui    = MAIN::CDEV->getEui(),
                               e_.info   = LMIC.adrAckReq));
-            setDrTxpow(DRCHG_NOADRACK, decDR((dr_t)LMIC.datarate), KEEP_TXPOW);
+            dr_t newDr = decDR((dr_t)LMIC.datarate);
+            if( newDr == (dr_t)LMIC.datarate) {
+                // We are already at the minimum datarate
+                // try to REJOIN
+                LMIC.opmode |= OP_REJOIN;
+            }
+            // Decrease DataRate and restore fullpower.
+            setDrTxpow(DRCHG_NOADRACK, newDr, pow2dBm(0));
             LMIC.adrAckReq = LINK_CHECK_CONT;
-            LMIC.opmode |= OP_REJOIN|OP_LINKDEAD;
+            LMIC.opmode |= OP_LINKDEAD;
             reportEvent(EV_LINK_DEAD);
         }
 #if !defined(DISABLE_BEACONS)
@@ -1836,10 +1844,8 @@ static void engineUpdate (void) {
                     // in AS923 v1.1 or older, no need to change the datarate.
                     txdr = lowerDR(txdr, LMIC.rejoinCnt);
 #endif
-                    ftype = HDR_FTYPE_REJOIN;
-                } else {
-                    ftype = HDR_FTYPE_JREQ;
                 }
+                ftype = HDR_FTYPE_JREQ;
                 buildJoinRequest(ftype);
                 LMIC.osjob.func = FUNC_ADDR(jreqDone);
             } else
@@ -1873,6 +1879,8 @@ static void engineUpdate (void) {
             LMIC.dndr   = txdr;  // carry TX datarate (can be != LMIC.datarate) over to txDone/setupRx1
             LMIC.opmode = (LMIC.opmode & ~(OP_POLL|OP_RNDTX)) | OP_TXRXPEND | OP_NEXTCHNL;
             LMICbandplan_updateTx(txbeg);
+            // limit power to value asked in adr
+            LMIC.radio_txpow = LMIC.txpow > LMIC.adrTxPow ? LMIC.adrTxPow : LMIC.txpow;
             reportEvent(EV_TXSTART);
             os_radio(RADIO_TX);
             return;
