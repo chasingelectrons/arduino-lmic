@@ -1,6 +1,6 @@
 /*
 * Copyright (c) 2014-2016 IBM Corporation.
-* Copyright (c) 2017 MCCI Corporation.
+* Copyright (c) 2017, 2019-2021 MCCI Corporation.
 * All rights reserved.
 *
 *  Redistribution and use in source and binary forms, with or without
@@ -49,21 +49,36 @@ CONST_TABLE(u1_t, _DR2RPS_CRC)[] = {
         ILLEGAL_RPS
 };
 
-static CONST_TABLE(u1_t, maxFrameLens)[] = { 64,64,64,123 };
+bit_t
+LMICeu868_validDR(dr_t dr) {
+        // use subtract here to avoid overflow
+        if (dr >= LENOF_TABLE(_DR2RPS_CRC) - 2)
+                return 0;
+        return TABLE_GET_U1(_DR2RPS_CRC, dr+1)!=ILLEGAL_RPS;
+}
+
+static CONST_TABLE(u1_t, maxFrameLens)[] = {
+        59+5, 59+5, 59+5, 123+5, 250+5, 250+5, 250+5, 250+5
+};
 
 uint8_t LMICeu868_maxFrameLen(uint8_t dr) {
         if (dr < LENOF_TABLE(maxFrameLens))
                 return TABLE_GET_U1(maxFrameLens, dr);
         else
-                return 0xFF;
+                return 0;
 }
 
 static CONST_TABLE(s1_t, TXPOWLEVELS)[] = {
-        16, 14, 12, 10, 8, 6, 4, 2, 0,0,0,0, 0,0,0,0
+        16, 14, 12, 10, 8, 6, 4, 2
 };
 
 int8_t LMICeu868_pow2dBm(uint8_t mcmd_ladr_p1) {
-        return TABLE_GET_S1(TXPOWLEVELS, (mcmd_ladr_p1&MCMD_LADR_POW_MASK)>>MCMD_LADR_POW_SHIFT);
+        uint8_t const pindex = (mcmd_ladr_p1&MCMD_LinkADRReq_POW_MASK)>>MCMD_LinkADRReq_POW_SHIFT;
+        if (pindex < LENOF_TABLE(TXPOWLEVELS)) {
+                return TABLE_GET_S1(TXPOWLEVELS, pindex);
+        } else {
+                return -128;
+        }
 }
 
 // only used in this module, but used by variant macro dr2hsym().
@@ -75,7 +90,7 @@ static CONST_TABLE(ostime_t, DR2HSYM_osticks)[] = {
         us2osticksRound(128 << 3),  // DR_SF8
         us2osticksRound(128 << 2),  // DR_SF7
         us2osticksRound(128 << 1),  // DR_SF7B
-        us2osticksRound(80)       // FSK -- not used (time for 1/2 byte)
+        us2osticksRound(80)         // FSK -- time for 1/2 byte (unused by LMIC)
 };
 
 ostime_t LMICeu868_dr2hsym(uint8_t dr) {
@@ -93,6 +108,9 @@ static CONST_TABLE(u4_t, iniChannelFreq)[6] = {
 
 void LMICeu868_initDefaultChannels(bit_t join) {
         os_clearMem(&LMIC.channelFreq, sizeof(LMIC.channelFreq));
+#if !defined(DISABLE_MCMD_DlChannelReq)
+        os_clearMem(&LMIC.channelDlFreq, sizeof(LMIC.channelDlFreq));
+#endif // !DISABLE_MCMD_DlChannelReq
         os_clearMem(&LMIC.channelDrMap, sizeof(LMIC.channelDrMap));
         os_clearMem(&LMIC.bands, sizeof(LMIC.bands));
 
@@ -104,18 +122,9 @@ void LMICeu868_initDefaultChannels(bit_t join) {
                 LMIC.channelDrMap[fu] = DR_RANGE_MAP(EU868_DR_SF12, EU868_DR_SF7);
         }
 
-        LMIC.bands[BAND_MILLI].txcap = 1000;  // 0.1%
-        LMIC.bands[BAND_MILLI].txpow = 14;
-        LMIC.bands[BAND_MILLI].lastchnl = os_getRndU1() % MAX_CHANNELS;
-        LMIC.bands[BAND_CENTI].txcap = 100;   // 1%
-        LMIC.bands[BAND_CENTI].txpow = 14;
-        LMIC.bands[BAND_CENTI].lastchnl = os_getRndU1() % MAX_CHANNELS;
-        LMIC.bands[BAND_DECI].txcap = 10;    // 10%
-        LMIC.bands[BAND_DECI].txpow = 27;
-        LMIC.bands[BAND_DECI].lastchnl = os_getRndU1() % MAX_CHANNELS;
-        LMIC.bands[BAND_MILLI].avail =
-                LMIC.bands[BAND_CENTI].avail =
-                LMIC.bands[BAND_DECI].avail = os_getTime();
+        (void) LMIC_setupBand(BAND_MILLI, 14 /* dBm */, 1000 /* 0.1% */);
+        (void) LMIC_setupBand(BAND_CENTI, 14 /* dBm */,  100 /* 1% */);
+        (void) LMIC_setupBand(BAND_DECI,  27 /* dBm */,   10 /* 10% */);
 }
 
 bit_t LMIC_setupBand(u1_t bandidx, s1_t txpow, u2_t txcap) {
@@ -129,26 +138,70 @@ bit_t LMIC_setupBand(u1_t bandidx, s1_t txpow, u2_t txcap) {
         return 1;
 }
 
+// this table is from highest to lowest
+static CONST_TABLE(u4_t, bandAssignments)[] = {
+  870000000 /* .. and above */    | BAND_MILLI,
+  869700000 /* .. 869700000 */    | BAND_CENTI,
+  869650000 /* .. 869700000 */    | BAND_MILLI,
+  869400000 /* .. 869650000 */    | BAND_DECI,
+  868600000 /* .. 869640000 */    | BAND_MILLI,
+  865000000 /* .. 868400000 */    | BAND_CENTI,
+};
+
+///
+/// \brief query number of default channels.
+///
+u1_t LMIC_queryNumDefaultChannels() {
+        return NUM_DEFAULT_CHANNELS;
+}
+
+///
+/// \brief LMIC_setupChannel for EU 868
+///
+/// \note according to LoRaWAN 1.0.3 section 5.6, "the acceptable range
+///     for **ChIndex** is N to 16", where N is our \c NUM_DEFAULT_CHANNELS.
+///     This routine is used internally for MAC commands, so we enforce
+///     this for the extenal API as well.
+///
 bit_t LMIC_setupChannel(u1_t chidx, u4_t freq, u2_t drmap, s1_t band) {
+        // zero the band bits in freq, just in case.
+        freq &= ~3;
+
+        if (chidx < NUM_DEFAULT_CHANNELS) {
+                // can't do anything to a default channel.
+                return 0;
+        }
+        bit_t fEnable = (freq != 0);
         if (chidx >= MAX_CHANNELS)
                 return 0;
+
         if (band == -1) {
-                if (freq >= 869400000 && freq <= 869650000)
-                        freq |= BAND_DECI;   // 10% 27dBm
-                else if ((freq >= 868000000 && freq <= 868600000) ||
-                        (freq >= 869700000 && freq <= 870000000))
-                        freq |= BAND_CENTI;  // 1% 14dBm
-                else
-                        freq |= BAND_MILLI;  // 0.1% 14dBm
+                for (u1_t i = 0; i < LENOF_TABLE(bandAssignments); ++i) {
+                        const u4_t thisFreqBand = TABLE_GET_U4(bandAssignments, i);
+                        const u4_t thisFreq = thisFreqBand & ~3;
+                        if (freq >= thisFreq) {
+                                band = ((u1_t)thisFreqBand & 3);
+                                break;
+                        }
+                }
+
+                // if we didn't identify a frequency, it's millis.
+                if (band == -1) {
+                        band = BAND_MILLI;
+                }
         }
-        else {
-                if (band > BAND_AUX) return 0;
-                freq = (freq&~3) | band;
-        }
+
+        if ((u1_t)band > BAND_AUX)
+                return 0;
+
+        freq |= band;
+
         LMIC.channelFreq[chidx] = freq;
-        // TODO(tmm@mcci.com): don't use US SF directly, use something from the LMIC context or a static const
         LMIC.channelDrMap[chidx] = drmap == 0 ? DR_RANGE_MAP(EU868_DR_SF12, EU868_DR_SF7) : drmap;
-        LMIC.channelMap |= 1 << chidx;  // enabled right away
+        if (fEnable)
+                LMIC.channelMap |= 1 << chidx;  // enabled right away
+        else
+                LMIC.channelMap &= ~(1 << chidx);
         return 1;
 }
 
@@ -170,32 +223,111 @@ ostime_t LMICeu868_nextJoinTime(ostime_t time) {
         return time;
 }
 
+///
+/// \brief change the TX channel given the desired tx time.
+///
+/// \param [in] now is the time at which we want to transmit. In fact, it's always
+///     the current time.
+///
+/// \returns the actual time at which we can transmit. \c LMIC.txChnl is set to the
+///     selected channel.
+///
+/// \details
+///     We scan all the channels, creating a mask of all enabled channels that are
+///     feasible at the earliest possible time. We then randomly choose one from
+///     that, updating the shuffle mask.
+///
+///     One sublety is that we have to cope with an artifact of the shuffler.
+///     It will zero out bits for candidates that are real candidates, but
+///     not in the time window, and not consider them as early as it should.
+///     So we keep a mask of all feasible channels, and make sure that they
+///     remain set in the shuffle mask if appropriate.
+///
 ostime_t LMICeu868_nextTx(ostime_t now) {
-        u1_t bmap = 0xF;
-        do {
-                ostime_t mintime = now + /*8h*/sec2osticks(28800);
-                u1_t band = 0;
-                for (u1_t bi = 0; bi<4; bi++) {
-                        if ((bmap & (1 << bi)) && mintime - LMIC.bands[bi].avail > 0)
-                                mintime = LMIC.bands[band = bi].avail;
-                }
-                // Find next channel in given band
-                u1_t chnl = LMIC.bands[band].lastchnl;
-                for (u1_t ci = 0; ci<MAX_CHANNELS; ci++) {
-                        if ((chnl = (chnl + 1)) >= MAX_CHANNELS)
-                                chnl -= MAX_CHANNELS;
-                        if ((LMIC.channelMap & (1 << chnl)) != 0 &&  // channel enabled
-                                (LMIC.channelDrMap[chnl] & (1 << (LMIC.datarate & 0xF))) != 0 &&
-                                band == (LMIC.channelFreq[chnl] & 0x3)) { // in selected band
-                                LMIC.txChnl = LMIC.bands[band].lastchnl = chnl;
-                                return mintime;
-                        }
-                }
-                if ((bmap &= ~(1 << band)) == 0) {
-                        // No feasible channel  found!
-                        return mintime;
-                }
-        } while (1);
+        ostime_t mintime = now + /*8h*/sec2osticks(28800);
+        u2_t availMap;
+        u2_t feasibleMap;
+        u1_t bandMap;
+
+        // set mintime to the earliest time of all enabled channels
+        // (can't just look at bands); and for a given channel, we
+        // can't tell if we're ready till we've checked all possible
+        // avail times.
+        bandMap = 0;
+        for (u1_t chnl = 0; chnl < MAX_CHANNELS; ++chnl) {
+                u2_t chnlBit = 1 << chnl;
+
+                // none at any higher numbers?
+                if (LMIC.channelMap < chnlBit)
+                        break;
+
+                // not enabled?
+                if ((LMIC.channelMap & chnlBit) == 0)
+                        continue;
+
+                // not feasible?
+                if ((LMIC.channelDrMap[chnl] & (1 << (LMIC.datarate & 0xF))) == 0)
+                        continue;
+
+                u1_t const band = LMIC.channelFreq[chnl] & 0x3;
+                u1_t const thisBandBit = 1 << band;
+                // already considered?
+                if ((bandMap & thisBandBit) != 0)
+                        continue;
+
+                // consider this band.
+                bandMap |= thisBandBit;
+
+                // enabled, not considered, feasible: adjust the min time.
+                if ((s4_t)(mintime - LMIC.bands[band].avail) > 0)
+                        mintime = LMIC.bands[band].avail;
+        }
+
+        // make a mask of candidates available for use
+        availMap = 0;
+        feasibleMap = 0;
+        for (u1_t chnl = 0; chnl < MAX_CHANNELS; ++chnl) {
+                u2_t chnlBit = 1 << chnl;
+
+                // none at any higher numbers?
+                if (LMIC.channelMap < chnlBit)
+                        break;
+
+                // not enabled?
+                if ((LMIC.channelMap & chnlBit) == 0)
+                        continue;
+
+                // not feasible?
+                if ((LMIC.channelDrMap[chnl] & (1 << (LMIC.datarate & 0xF))) == 0)
+                        continue;
+
+                // This channel is feasible. But might not be available.
+                feasibleMap |= chnlBit;
+
+                // not available yet?
+                u1_t const band = LMIC.channelFreq[chnl] & 0x3;
+                if ((s4_t)(LMIC.bands[band].avail - mintime) > 0)
+                        continue;
+
+                // ok: this is a candidate.
+                availMap |= chnlBit;
+        }
+
+        // find the next available chennel.
+        u2_t saveShuffleMap = LMIC.channelShuffleMap;
+        int candidateCh = LMIC_findNextChannel(&LMIC.channelShuffleMap, &availMap, 1, LMIC.txChnl == 0xFF ? -1 : LMIC.txChnl);
+
+        // restore bits in the shuffleMap that were on, but might have reset
+        // if availMap was used to refresh shuffleMap. These are channels that
+        // are feasble but not yet candidates due to band saturation
+        LMIC.channelShuffleMap |= saveShuffleMap & feasibleMap & ~availMap;
+
+        if (candidateCh >= 0) {
+                // update the channel; otherwise we'll just use the
+                // most recent one.
+                LMIC.txChnl = candidateCh;
+        }
+        return mintime;
 }
 
 
@@ -213,12 +345,28 @@ ostime_t LMICeu868_nextJoinState(void) {
 }
 #endif // !DISABLE_JOIN
 
-// txDone handling for FSK.
-void
-LMICeu868_txDoneFSK(ostime_t delay, osjobcb_t func) {
-        LMIC.rxtime = LMIC.txend + delay - PRERX_FSK*us2osticksRound(160);
-        LMIC.rxsyms = RXLEN_FSK;
-        os_setTimedCallback(&LMIC.osjob, LMIC.rxtime - RX_RAMPUP, func);
+// set the Rx1 dndr, rps.
+void LMICeu868_setRx1Params(void) {
+    u1_t const txdr = LMIC.dndr;
+    s1_t drOffset;
+    s1_t candidateDr;
+
+    LMICeulike_setRx1Freq();
+
+    if ( LMIC.rx1DrOffset <= 5)
+        drOffset = (s1_t) LMIC.rx1DrOffset;
+    else
+        // make a reasonable assumption for unspecified value.
+        drOffset = 5;
+
+    candidateDr = (s1_t) txdr - drOffset;
+    if (candidateDr < LORAWAN_DR0)
+            candidateDr = 0;
+    else if (candidateDr > LORAWAN_DR7)
+            candidateDr = LORAWAN_DR7;
+
+    LMIC.dndr = (u1_t) candidateDr;
+    LMIC.rps = dndr2rps(LMIC.dndr);
 }
 
 void

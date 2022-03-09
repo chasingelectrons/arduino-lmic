@@ -68,6 +68,7 @@ enum {
         AS923_FREQ_MAX = 928000000
 };
 enum {
+        AS923_JP_TX_EIRP_MAX_DBM = 13,  // 13 dBm = 19.95mW < 20mW
         AS923_TX_EIRP_MAX_DBM = 16      // 16 dBm
 };
 enum { DR_PAGE_AS923 = 0x10 * (LMIC_REGION_as923 - 1) };
@@ -75,14 +76,14 @@ enum { DR_PAGE_AS923 = 0x10 * (LMIC_REGION_as923 - 1) };
 enum { AS923_LMIC_REGION_EIRP = 1 };         // region uses EIRP
 
 enum { AS923JP_LBT_US = 5000 };         // microseconds of LBT time -- 5000 ==>
-					// 5 ms. We use us rather than ms for
-					// future 128us support, and just for
-					// backward compatibility -- there
-					// is code that uses the _US constant,
-					// and it's awkward to break it.
+                                        // 5 ms. We use us rather than ms for
+                                        // future 128us support, and just for
+                                        // backward compatibility -- there
+                                        // is code that uses the _US constant,
+                                        // and it's awkward to break it.
 
 enum { AS923JP_LBT_DB_MAX = -80 };      // maximum channel strength in dB; if TX
-					// we measure more than this, we don't tx.
+                                        // we measure more than this, we don't tx.
 
 // AS923 v1.1, all channels face a 1% duty cycle. So this will have to change
 // in the future via a config. But this code base needs major changes for
@@ -92,5 +93,14 @@ enum { AS923_V102_TX_CAP = 100 };		// v1.0.2 allows 100%
 #ifndef AS923_TX_CAP
 # define AS923_TX_CAP	AS923_V102_TX_CAP
 #endif
+
+// TxParam defaults
+enum {
+        // initial value of UplinkDwellTime before TxParamSetupReq received.
+        AS923_INITIAL_TxParam_UplinkDwellTime = 1,
+        // initial value of DownlinkDwellTime before TxParamSetupReq received.
+        AS923_INITIAL_TxParam_DownlinkDwellTime = 1,
+        AS923_UPLINK_DWELL_TIME_osticks = sec2osticks(20),
+};
 
 #endif /* _lorabase_as923_h_ */

@@ -1,6 +1,6 @@
 /*
 * Copyright (c) 2014-2016 IBM Corporation.
-* Copyright (c) 2017 MCCI Corporation.
+* Copyright (c) 2017, 2019-2021 MCCI Corporation.
 * All rights reserved.
 *
 *  Redistribution and use in source and binary forms, with or without
@@ -55,13 +55,34 @@ CONST_TABLE(u1_t, _DR2RPS_CRC)[] = {
         ILLEGAL_RPS				// [14]
 };
 
-static CONST_TABLE(u1_t, maxFrameLens)[] = { 24,66,142,255,255,255,255,255,  66,142 };
+bit_t
+LMICus915_validDR(dr_t dr) {
+        // use subtract here to avoid overflow
+        if (dr >= LENOF_TABLE(_DR2RPS_CRC) - 2)
+                return 0;
+        return TABLE_GET_U1(_DR2RPS_CRC, dr+1)!=ILLEGAL_RPS;
+}
+
+static CONST_TABLE(u1_t, maxFrameLens)[] = {
+        19+5, 61+5, 133+5, 250+5, 250+5, 0, 0,0,
+        61+5, 133+5, 250+5, 250+5, 250+5, 250+5
+        };
 
 uint8_t LMICus915_maxFrameLen(uint8_t dr) {
         if (dr < LENOF_TABLE(maxFrameLens))
                 return TABLE_GET_U1(maxFrameLens, dr);
         else
-                return 0xFF;
+                return 0;
+}
+
+int8_t LMICus915_pow2dbm(uint8_t mcmd_ladr_p1) {
+        if ((mcmd_ladr_p1 & MCMD_LinkADRReq_POW_MASK) >
+            ((LMIC_LORAWAN_SPEC_VERSION < LMIC_LORAWAN_SPEC_VERSION_1_0_3)
+                        ? US915_LinkAdrReq_POW_MAX_1_0_2
+                        : US915_LinkAdrReq_POW_MAX_1_0_3))
+                return -128;
+        else
+                return ((s1_t)(US915_TX_MAX_DBM - (((mcmd_ladr_p1)&MCMD_LinkADRReq_POW_MASK)<<1)));
 }
 
 static CONST_TABLE(ostime_t, DR2HSYM_osticks)[] = {
@@ -86,21 +107,36 @@ u4_t LMICus915_convFreq(xref2cu1_t ptr) {
         return freq;
 }
 
-bit_t LMIC_setupChannel(u1_t chidx, u4_t freq, u2_t drmap, s1_t band) {
-        LMIC_API_PARAMETER(band);
-
-        if (chidx < 72 || chidx >= 72 + MAX_XCHANNELS)
-                return 0; // channels 0..71 are hardwired
-        LMIC.xchFreq[chidx - 72] = freq;
-        // TODO(tmm@mcci.com): don't use US SF directly, use something from the LMIC context or a static const
-        LMIC.xchDrMap[chidx - 72] = drmap == 0 ? DR_RANGE_MAP(US915_DR_SF10, US915_DR_SF8C) : drmap;
-        LMIC.channelMap[chidx >> 4] |= (1 << (chidx & 0xF));
-        return 1;
+///
+/// \brief query number of default channels.
+///
+///     For US, we have no programmable channels; all channels
+///     are fixed. Return the total channel count.
+///
+u1_t LMIC_queryNumDefaultChannels() {
+        return 64 + 8;
 }
 
-void LMIC_disableChannel(u1_t channel) {
-        if (channel < 72 + MAX_XCHANNELS) {
+///
+/// \brief LMIC_setupChannel for US915
+///
+/// \note there are no progammable channels for US915, so this API
+///     always returns FALSE.
+///
+bit_t LMIC_setupChannel(u1_t chidx, u4_t freq, u2_t drmap, s1_t band) {
+        LMIC_API_PARAMETER(chidx);
+        LMIC_API_PARAMETER(freq);
+        LMIC_API_PARAMETER(drmap);
+        LMIC_API_PARAMETER(band);
+
+        return 0; // channels 0..71 are hardwired
+}
+
+bit_t LMIC_disableChannel(u1_t channel) {
+        bit_t result = 0;
+        if (channel < 72) {
                 if (ENABLED_CHANNEL(channel)) {
+                        result = 1;
                         if (IS_CHANNEL_125khz(channel))
                                 LMIC.activeChannels125khz--;
                         else if (IS_CHANNEL_500khz(channel))
@@ -108,11 +144,14 @@ void LMIC_disableChannel(u1_t channel) {
                 }
                 LMIC.channelMap[channel >> 4] &= ~(1 << (channel & 0xF));
         }
+        return result;
 }
 
-void LMIC_enableChannel(u1_t channel) {
-        if (channel < 72 + MAX_XCHANNELS) {
+bit_t LMIC_enableChannel(u1_t channel) {
+        bit_t result = 0;
+        if (channel < 72) {
                 if (!ENABLED_CHANNEL(channel)) {
+                        result = 1;
                         if (IS_CHANNEL_125khz(channel))
                                 LMIC.activeChannels125khz++;
                         else if (IS_CHANNEL_500khz(channel))
@@ -120,42 +159,52 @@ void LMIC_enableChannel(u1_t channel) {
                 }
                 LMIC.channelMap[channel >> 4] |= (1 << (channel & 0xF));
         }
+        return result;
 }
 
-void  LMIC_enableSubBand(u1_t band) {
+bit_t  LMIC_enableSubBand(u1_t band) {
         ASSERT(band < 8);
         u1_t start = band * 8;
         u1_t end = start + 8;
+        bit_t result = 0;
 
         // enable all eight 125 kHz channels in this subband
         for (int channel = start; channel < end; ++channel)
-                LMIC_enableChannel(channel);
+                result |= LMIC_enableChannel(channel);
 
         // there's a single 500 kHz channel associated with
         // each group of 8 125 kHz channels. Enable it, too.
-        LMIC_enableChannel(64 + band);
+        result |= LMIC_enableChannel(64 + band);
+        return result;
 }
-void  LMIC_disableSubBand(u1_t band) {
+
+bit_t  LMIC_disableSubBand(u1_t band) {
         ASSERT(band < 8);
         u1_t start = band * 8;
         u1_t end = start + 8;
+        bit_t result = 0;
 
         // disable all eight 125 kHz channels in this subband
         for (int channel = start; channel < end; ++channel)
-                LMIC_disableChannel(channel);
+                result |= LMIC_disableChannel(channel);
 
         // there's a single 500 kHz channel associated with
         // each group of 8 125 kHz channels. Disable it, too.
-        LMIC_disableChannel(64 + band);
+        result |= LMIC_disableChannel(64 + band);
+        return result;
 }
-void  LMIC_selectSubBand(u1_t band) {
+
+bit_t  LMIC_selectSubBand(u1_t band) {
+        bit_t result = 0;
+
         ASSERT(band < 8);
         for (int b = 0; b<8; ++b) {
                 if (band == b)
-                        LMIC_enableSubBand(b);
+                        result |= LMIC_enableSubBand(b);
                 else
-                        LMIC_disableSubBand(b);
+                        result |= LMIC_disableSubBand(b);
         }
+        return result;
 }
 
 void LMICus915_updateTx(ostime_t txbeg) {
@@ -169,13 +218,7 @@ void LMICus915_updateTx(ostime_t txbeg) {
         } else {
                 // at 500kHz bandwidth, we're allowed more power.
                 LMIC.txpow = 26;
-                if (chnl < 64 + 8) {
-                        LMIC.freq = US915_500kHz_UPFBASE + (chnl - 64)*US915_500kHz_UPFSTEP;
-                }
-                else {
-                        ASSERT(chnl < 64 + 8 + MAX_XCHANNELS);
-                        LMIC.freq = LMIC.xchFreq[chnl - 72];
-                }
+                LMIC.freq = US915_500kHz_UPFBASE + (chnl - 64)*US915_500kHz_UPFSTEP;
         }
 
         // Update global duty cycle stats
@@ -193,16 +236,31 @@ void LMICus915_setBcnRxParams(void) {
 }
 #endif // !DISABLE_BEACONS
 
-// TODO(tmm@mcci.com): parmeterize for US-like
+// set the Rx1 dndr, rps.
 void LMICus915_setRx1Params(void) {
+    u1_t const txdr = LMIC.dndr;
+    u1_t candidateDr;
     LMIC.freq = US915_500kHz_DNFBASE + (LMIC.txChnl & 0x7) * US915_500kHz_DNFSTEP;
-    if( /* TX datarate */LMIC.dndr < US915_DR_SF8C )
-        LMIC.dndr += US915_DR_SF10CR - US915_DR_SF10;
-    else if( LMIC.dndr == US915_DR_SF8C )
-        LMIC.dndr = US915_DR_SF7CR;
+    if ( /* TX datarate */txdr < LORAWAN_DR4)
+            candidateDr = txdr + 10 - LMIC.rx1DrOffset;
+    else
+            candidateDr = LORAWAN_DR13 - LMIC.rx1DrOffset;
+
+    if (candidateDr < LORAWAN_DR8)
+            candidateDr = LORAWAN_DR8;
+    else if (candidateDr > LORAWAN_DR13)
+            candidateDr = LORAWAN_DR13;
+
+    LMIC.dndr = candidateDr;
     LMIC.rps = dndr2rps(LMIC.dndr);
 }
 
+void LMICus915_initJoinLoop(void) {
+    LMICuslike_initJoinLoop();
+
+    // initialize the adrTxPower.
+    LMIC.adrTxPow = 20; // dBm
+}
 
 //
 // END: US915 related stuff

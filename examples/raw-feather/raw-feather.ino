@@ -57,7 +57,13 @@ Author:
 #define RX_RSSI_INTERVAL 100    // milliseconds
 
 // Pin mapping for Adafruit Feather M0 LoRa, etc.
-#if defined(ARDUINO_SAMD_FEATHER_M0)
+//
+// Adafruit BSPs are not consistent -- m0 express defs ARDUINO_SAMD_FEATHER_M0,
+// m0 defs ADAFRUIT_FEATHER_M0
+//
+#if defined(ARDUINO_SAMD_FEATHER_M0) || defined(ADAFRUIT_FEATHER_M0)
+// /!\ By default Adafruit Feather M0's pin 6 and DIO1 are not connected.
+// Please ensure they are connected.
 const lmic_pinmap lmic_pins = {
     .nss = 8,
     .rxtx = LMIC_UNUSED_PIN,
@@ -72,13 +78,15 @@ const lmic_pinmap lmic_pins = {
 // Just like Feather M0 LoRa, but uses SPI at 1MHz; and that's only
 // because MCCI doesn't have a test board; probably higher frequencies
 // will work.
+// /!\ By default Feather 32u4's pin 6 and DIO1 are not connected. Please 
+// ensure they are connected.
 const lmic_pinmap lmic_pins = {
     .nss = 8,
     .rxtx = LMIC_UNUSED_PIN,
     .rst = 4,
-    .dio = {3, 6, LMIC_UNUSED_PIN},
+    .dio = {7, 6, LMIC_UNUSED_PIN},
     .rxtx_rx_active = 0,
-    .rssi_cal = 8,              // LBT cal for the Adafruit Feather M0 LoRa, in dB
+    .rssi_cal = 8,              // LBT cal for the Adafruit Feather 32U4 LoRa, in dB
     .spi_freq = 1000000,
 };
 #elif defined(ARDUINO_CATENA_4551)
@@ -111,12 +119,41 @@ void os_getDevKey (u1_t* buf) { }
 void onEvent (ev_t ev) {
 }
 
+/*************************************************************\
+|     Work around for inconsistency in providing
+|     Serial.dtr() method
+\*************************************************************/
+
+// Use SFINAE to deal with lack of Serial.dtr() on some platforms
+template<class T>
+auto getDtr_help(T* obj)
+ -> decltype(  obj->dtr()  )
+{
+    return     obj->dtr();
+}
+// use this if there's no dtr() method
+auto getDtr_help(...) -> bool
+{
+    return false;
+}
+
+// this wrapper lets us avoid use of explicit pointers
+template<class T>
+bool getDtr(T &obj)
+  {
+  return getDtr_help(&obj);
+  }
+
+/*************************************************************\
+|     Print stub for use by LMIC
+\*************************************************************/
+
 extern "C" {
 void lmic_printf(const char *fmt, ...);
 };
 
 void lmic_printf(const char *fmt, ...) {
-        if (! Serial.dtr())
+        if (! getDtr(Serial))
                 return;
 
         char buf[256];
@@ -128,8 +165,12 @@ void lmic_printf(const char *fmt, ...) {
 
         // in case we overflowed:
         buf[sizeof(buf) - 1] = '\0';
-        if (Serial.dtr()) Serial.print(buf);
+        if (getDtr(Serial)) Serial.print(buf);
 }
+
+/*************************************************************\
+|     Application logic
+\*************************************************************/
 
 osjob_t txjob;
 osjob_t timeoutjob;
@@ -215,7 +256,7 @@ void setup() {
 
   // even after the delay, we wait for the host to open the port. operator
   // bool(Serial) just checks dtr(), and it tosses in a 10ms delay.
-  while(! Serial.dtr())
+  while(! getDtr(Serial))
         /* wait for the PC */;
 
   Serial.begin(115200);
@@ -305,7 +346,7 @@ void setup() {
 
   // default tx power for US: 21 dBm
   LMIC.txpow = 21;
-#elif defined(CFG_au921)
+#elif defined(CFG_au915)
   // make it easier for test, by pull the parameters up to the top of the
   // block. Ideally, we'd use the serial port to drive this; or have
   // a voting protocol where one side is elected the controller and
@@ -336,30 +377,30 @@ void setup() {
         {
         if (kUplinkChannel < 64)
                 {
-                LMIC.freq = AU921_125kHz_UPFBASE +
-                            kUplinkChannel * AU921_125kHz_UPFSTEP;
+                LMIC.freq = AU915_125kHz_UPFBASE +
+                            kUplinkChannel * AU915_125kHz_UPFSTEP;
                 uBandwidth = 125;
                 }
         else
                 {
-                LMIC.freq = AU921_500kHz_UPFBASE +
-                            (kUplinkChannel - 64) * AU921_500kHz_UPFSTEP;
+                LMIC.freq = AU915_500kHz_UPFBASE +
+                            (kUplinkChannel - 64) * AU915_500kHz_UPFSTEP;
                 uBandwidth = 500;
                 }
         }
   else
         {
         // downlink channel
-        LMIC.freq = AU921_500kHz_DNFBASE +
-                    kDownlinkChannel * AU921_500kHz_DNFSTEP;
+        LMIC.freq = AU915_500kHz_DNFBASE +
+                    kDownlinkChannel * AU915_500kHz_DNFSTEP;
         uBandwidth = 500;
         }
 
   // Use a suitable spreading factor
   if (uBandwidth < 500)
-        LMIC.datarate = AU921_DR_SF7;         // DR4
+        LMIC.datarate = AU915_DR_SF7;         // DR4
   else
-        LMIC.datarate = AU921_DR_SF12CR;      // DR8
+        LMIC.datarate = AU915_DR_SF12CR;      // DR8
 
   // default tx power for AU: 30 dBm
   LMIC.txpow = 30;
@@ -393,6 +434,30 @@ void setup() {
                 LMIC.lbt_ticks = us2osticks(AS923JP_LBT_US);
                 LMIC.lbt_dbmax = AS923JP_LBT_DB_MAX;
                 }
+#elif defined(CFG_kr920)
+// make it easier for test, by pull the parameters up to the top of the
+// block. Ideally, we'd use the serial port to drive this; or have
+// a voting protocol where one side is elected the controller and
+// guides the responder through all the channels, powers, ramps
+// the transmit power from min to max, and measures the RSSI and SNR.
+// Even more amazing would be a scheme where the controller could
+// handle multiple nodes; in that case we'd have a way to do
+// production test and qualification. However, using an RWC5020A
+// is a much better use of development time.
+        const static uint8_t kChannel = 0;
+        uint32_t uBandwidth;
+
+        LMIC.freq = KR920_F1 + kChannel * 200000;
+        uBandwidth = 125;
+
+        LMIC.datarate = KR920_DR_SF7;         // DR7
+        // default tx power for KR: 14 dBm
+        LMIC.txpow = KR920_TX_EIRP_MAX_DBM;
+        if (LMIC.freq < KR920_F14DBM)
+          LMIC.txpow = KR920_TX_EIRP_MAX_DBM_LOW;
+
+        LMIC.lbt_ticks = us2osticks(KR920_LBT_US);
+        LMIC.lbt_dbmax = KR920_LBT_DB_MAX;
 #elif defined(CFG_in866)
 // make it easier for test, by pull the parameters up to the top of the
 // block. Ideally, we'd use the serial port to drive this; or have

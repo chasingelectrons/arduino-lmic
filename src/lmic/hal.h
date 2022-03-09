@@ -1,6 +1,6 @@
 /*
  * Copyright (c) 2014-2016 IBM Corporation.
- * Copyright (c) 2016, 2018 MCCI Corporation.
+ * Copyright (c) 2016, 2018-2019 MCCI Corporation.
  * All rights reserved.
  *
  *  Redistribution and use in source and binary forms, with or without
@@ -95,6 +95,11 @@ void hal_disableIRQs (void);
 void hal_enableIRQs (void);
 
 /*
+ * return CPU interrupt nesting count
+ */
+uint8_t hal_getIrqLevel (void);
+
+/*
  * put system and CPU in low-power mode, sleep until interrupt.
  */
 void hal_sleep (void);
@@ -105,9 +110,10 @@ void hal_sleep (void);
 u4_t hal_ticks (void);
 
 /*
- * busy-wait until specified timestamp (in ticks) is reached.
+ * busy-wait until specified timestamp (in ticks) is reached. If on-time, return 0,
+ * otherwise return the number of ticks we were late.
  */
-void hal_waitUntil (u4_t time);
+u4_t hal_waitUntil (u4_t time);
 
 /*
  * check and rewind timer for target time.
@@ -142,7 +148,37 @@ s1_t hal_getRssiCal (void);
  */
 ostime_t hal_setModuleActive (bit_t val);
 
+/* find out if we're using Tcxo */
 bit_t hal_queryUsingTcxo(void);
+
+/* represent the various radio TX power policy */
+enum	{
+	LMICHAL_radio_tx_power_policy_rfo	= 0,
+	LMICHAL_radio_tx_power_policy_paboost	= 1,
+	LMICHAL_radio_tx_power_policy_20dBm	= 2,
+};
+
+/*
+ * query the configuration as to the Tx Power Policy
+ * to be used on this board, given our desires and
+ * requested power.
+ */
+uint8_t hal_getTxPowerPolicy(
+	u1_t inputPolicy,
+	s1_t requestedPower,
+	u4_t freq
+	);
+
+void hal_pollPendingIRQs_helper();
+void hal_processPendingIRQs(void);
+
+/// \brief check for any pending interrupts: stub if interrupts are enabled.
+static inline void hal_pollPendingIRQs(void)
+	{
+#if !defined(LMIC_USE_INTERRUPTS)
+	hal_pollPendingIRQs_helper();
+#endif /* !defined(LMIC_USE_INTERRUPTS) */
+	}
 
 #ifdef __cplusplus
 } // extern "C"

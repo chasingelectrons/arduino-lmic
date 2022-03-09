@@ -13,6 +13,8 @@ Author:
 
 */
 
+#if defined(ARDUINO_AVR_FEATHER32U4)
+
 #include <arduino_lmic_hal_boards.h>
 #include <Arduino.h>
 
@@ -27,7 +29,7 @@ public:
 		{
 		PIN_SX1276_NSS = 8,
 		PIN_SX1276_NRESET = 4,
-		PIN_SX1276_DIO0 = 3,
+		PIN_SX1276_DIO0 = 7,
 		PIN_SX1276_DIO1 = 6,
 		PIN_SX1276_DIO2 = HalPinmap_t::UNUSED_PIN,
 		PIN_SX1276_ANT_SWITCH_RX = HalPinmap_t::UNUSED_PIN,
@@ -45,7 +47,7 @@ public:
 	// virtual void end(void) override
 
 	// virtual ostime_t setModuleActive(bool state) override
-	
+
 	};
 
 static HalConfiguration_Feather32U4LoRa_t myConfig;
@@ -66,7 +68,7 @@ static const HalPinmap_t myPinmap =
                 HalConfiguration_Feather32U4LoRa_t::PIN_SX1276_DIO2,    // DIO2 is D27
                },
         .rxtx_rx_active = 0,
-        .rssi_cal = 10,
+        .rssi_cal = 8,
         .spi_freq = 1000000,     /* 1MHz */
         .pConfig = &myConfig,
         };
@@ -77,3 +79,5 @@ const HalPinmap_t *GetPinmap_Feather32U4LoRa(void)
 	}
 
 }; // namespace Arduino_LMIC
+
+#endif // ARDUINO_AVR_FEATHER32U4
